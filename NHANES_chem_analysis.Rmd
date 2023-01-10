@@ -1,0 +1,1807 @@
+---
+title: "NHANES Data Analysis"
+author: "Chanese A. Forte & Jess A. Millar"
+header-includes:
+   - \usepackage{amsmath}
+   - \usepackage{mathrsfs}
+output:
+  html_document:
+    highlight: haddock
+    toc: yes
+    toc_depth: 3
+    code_folding: hide
+    df_print: paged
+    number_sections: FALSE
+params:
+  prefix: comp
+csl: ecology.csl
+---
+
+\newcommand\prob[1]{\mathbb{P}\left[{#1}\right]}
+\newcommand\expect[1]{\mathbb{E}\left[{#1}\right]}
+\newcommand\var[1]{\mathrm{Var}\left[{#1}\right]}
+\newcommand\dist[2]{\mathrm{#1}\left(#2\right)}
+\newcommand\dlta[1]{{\Delta}{#1}}
+\newcommand\lik{\mathscr{L}}
+\newcommand\loglik{\ell}
+\newcommand\ess{\mathrm{S}}
+\newcommand\ai{\mathrm{I}}
+
+<script type="text/x-mathjax-config">
+MathJax.Hub.Register.StartupHook("TeX Jax Ready",function () {
+  MathJax.Hub.Insert(MathJax.InputJax.TeX.Definitions.macros,{
+    cancel: ["Extension","cancel"],
+    bcancel: ["Extension","cancel"],
+    xcancel: ["Extension","cancel"],
+    cancelto: ["Extension","cancel"]
+  });
+});
+</script>
+
+```{r options,include=FALSE,purl=FALSE}
+library(knitr)
+opts_chunk$set(
+  progress=TRUE,
+  prompt=FALSE,tidy=FALSE,highlight=TRUE,
+  strip.white=TRUE,
+  message=FALSE,
+  warning=TRUE,
+  error=TRUE,
+  #echo=TRUE,
+  cache=TRUE,
+  cache.extra=rand_seed,
+  eval=TRUE,
+  purl=FALSE,
+  fig.lp="fig:",
+  fig.pos="h!",
+  fig.path=paste0("figure/",params$prefix,"-"),
+  cache.path=paste0("cache/",params$prefix,"-"),
+  results='markup',
+  fig.show='asis',
+  size='small',
+  fig.align='center',
+  fig.height=4,fig.width=6.83,
+  dpi=300,
+  dev='png',
+  dev.args=list(bg='transparent')
+)
+options(
+  keep.source=TRUE,
+  encoding="UTF-8",
+  stringsAsFactors=FALSE
+)
+set.seed(728073764L)
+```
+
+```{r packages, echo=FALSE, results = FALSE}
+# pkgs<-c("RNHANES","dplyr","survey")
+pkgs<-c("tidyverse","nhanesA","RNHANES","survey","ggplot2","readxl","tableone","sjlabelled","kableExtra","WeightedROC","pROC","ResourceSelection","surveyCV","pomp","jtools","scales")
+
+# install.packages(pkgs) #install
+sapply(pkgs, require, character.only = T) #load
+
+# File path to project
+path_to_farmwork <- "/Users/jmillar/projects/ColacinoLab/farmwork"
+
+setwd(path_to_farmwork)
+```
+
+
+# Data
+
+## Load NHANES datasets
+
+Load the various environmental sample datasets, with demographics information included.
+
+```{r inputdata}
+bake(file="rds/deet.rds",{
+  # downloading all of the data with demographics information attached. 
+  nhanes_load_data("OPD_D", "2005-2006" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat1
+  nhanes_load_data("OPD_E", "2007-2008" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat2
+  nhanes_load_data("OPD_G", "2011-2012" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat3
+
+  # joining the data by lab results
+  full_join(dat1,dat2, by=NULL) %>%
+    full_join(dat3, by=NULL) %>%
+    arrange_all(desc) %>% distinct() ->opd
+
+  # Only 1 row per SEQN
+  stopifnot(
+    opd %>%
+      group_by(SEQN) %>%
+      summarise(total=n()) %>%
+      filter(total>1) %>% nrow()==0
+  )
+
+  #################################################################
+
+  nhanes_load_data("CARB_D", "2005-2006" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat4
+  nhanes_load_data("CARB_E", "2007-2008" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat5
+
+  full_join(dat4,dat5,by=NULL) %>%
+    full_join(opd, by=NULL) %>%
+    arrange_all(desc) %>% distinct() %>%
+    group_by(SEQN) %>%
+    tidyr::fill(names(.), .direction="downup") %>%
+    ungroup() %>% distinct() %>%
+    group_by(SEQN) %>%
+    slice(1) %>%
+    ungroup() ->carb
+
+  # Only 1 row per SEQN
+  stopifnot(
+    carb %>%
+      group_by(SEQN) %>%
+      summarise(total=n()) %>%
+      filter(total>1) %>% nrow()==0
+  )
+
+  #################################################################
+
+  nhanes_load_data("LAB26PP", "1999-2000" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat6
+  nhanes_load_data("L26PP_B", "2001-2002" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat7
+
+  # by removing "file_name", we avoided 5,450 duplicates
+  full_join(dat6,dat7,by=NULL) %>%
+    full_join(carb, by=NULL) %>%
+    arrange_all(desc) %>% distinct() %>%
+    group_by(SEQN) %>%
+    tidyr::fill(names(.), .direction="downup") %>%
+    ungroup() %>% distinct() %>%
+    group_by(SEQN) %>%
+    slice(1) %>%
+    ungroup() -> pp
+
+  # Only 1 row per SEQN
+  stopifnot(
+    pp %>%
+      group_by(SEQN) %>%
+      summarise(total=n()) %>%
+      filter(total>1) %>% nrow()==0
+  )
+
+  #################################################################
+
+  nhanes_load_data("L26UPP_C", "2003-2004" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat8
+  nhanes_load_data("UPP_D", "2005-2006" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat9
+  nhanes_load_data("UPP_E", "2007-2008" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat10
+
+  # by removing "file_name", we avoided 10,900 duplicates
+  full_join(dat8,dat9,by=NULL) %>%
+    full_join(dat10, by=NULL) %>%
+    full_join(pp, by=NULL) %>%
+    arrange_all(desc) %>% distinct() %>%
+    group_by(SEQN) %>%
+    tidyr::fill(names(.), .direction="downup") %>%
+    ungroup() %>% distinct() %>%
+    group_by(SEQN) %>%
+    slice(1) %>%
+    ungroup() -> upp
+
+  # Only 1 row per SEQN
+  stopifnot(
+    upp %>%
+      group_by(SEQN) %>%
+      summarise(total=n()) %>%
+      filter(total>1) %>% nrow()==0
+  )
+
+  #################################################################
+
+  nhanes_load_data("L24PP_C", "2003-2004" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat11
+  nhanes_load_data("PP_D", "2005-2006" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat12
+  nhanes_load_data("PP_E", "2007-2008" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat13
+  nhanes_load_data("PP_F", "2009-2010" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat14
+  nhanes_load_data("PP_G", "2011-2012" , demographics=TRUE) %>% #incomplete dataset
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat15
+
+  full_join(dat11,dat12,by=NULL) %>%
+    full_join(dat13, by=NULL) %>%
+    full_join(dat14, by=NULL) %>%
+    full_join(dat15, by=NULL) %>%
+    full_join(upp, by=NULL) %>%
+    arrange_all(desc) %>% distinct() %>%
+    group_by(SEQN) %>%
+    tidyr::fill(names(.), .direction="downup") %>%
+    ungroup() %>% distinct() %>%
+    group_by(SEQN) %>%
+    slice(1) %>%
+    ungroup() -> L24
+
+  # Only 1 row per SEQN
+  stopifnot(
+    L24 %>%
+      group_by(SEQN) %>%
+      summarise(total=n()) %>%
+      filter(total>1) %>% nrow()==0
+  )
+
+  #################################################################
+
+  nhanes_load_data("LAB28POC", "1999-2000" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat16
+  nhanes_load_data("L28POC_B", "2001-2002" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat17
+  nhanes_load_data("L28OCP_C", "2003-2004" , demographics=TRUE) %>% #incomplete dataset
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat18
+
+  full_join(dat16,dat17,by=NULL) %>%
+    full_join(dat18, by=NULL) %>%
+    full_join(L24, by=NULL) %>%
+    arrange_all(desc) %>% distinct() %>%
+    group_by(SEQN) %>%
+    tidyr::fill(names(.), .direction="downup") %>%
+    ungroup() %>% distinct() %>%
+    group_by(SEQN) %>%
+    slice(1) %>%
+    ungroup() -> L28
+
+  # Only 1 row per SEQN
+  stopifnot(
+    L28 %>%
+      group_by(SEQN) %>%
+      summarise(total=n()) %>%
+      filter(total>1) %>% nrow()==0
+  )
+
+  # L28 %>%
+  #     group_by(SEQN) %>%
+  #     summarise(total=n()) %>%
+  #     filter(total>1) %>% pull(SEQN) -> duplicate_SEQN
+  # 
+  # library(arsenal)
+  # L28 %>% filter(SEQN==7) ->a
+  # comparedf(a[1,],a[2,])
+
+  #################################################################
+
+  nhanes_load_data("UPHOPM_F", "2009-2010" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat19
+  nhanes_load_data("UPHOPM_G", "2011-2012" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat20
+  nhanes_load_data("UPHOPM_H", "2013-2014" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat21
+
+  full_join(dat19,dat20,by=NULL) %>%
+    full_join(dat21, by=NULL) %>%
+    full_join(L28, by=NULL) %>%
+    arrange_all(desc) %>% distinct() %>%
+    group_by(SEQN) %>%
+    tidyr::fill(names(.), .direction="downup") %>%
+    ungroup() %>% distinct() %>%
+    group_by(SEQN) %>%
+    slice(1) %>%
+    ungroup() -> uphop
+
+  # Only 1 row per SEQN
+  stopifnot(
+    uphop %>%
+      group_by(SEQN) %>%
+      summarise(total=n()) %>%
+      filter(total>1) %>% nrow()==0
+  )
+
+  #################################################################
+
+  nhanes_load_data("DEET_E", "2007-2008" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat22
+  nhanes_load_data("DEET_F", "2009-2010" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat23
+  nhanes_load_data("DEET_G", "2011-2012" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat24
+  nhanes_load_data("DEET_H", "2013-2014" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> dat25
+
+  nhanes_load_data("UAM_E", "2007-2008" , demographics=TRUE) %>%
+    dplyr::select(-file_name, -begin_year, -end_year) -> uam
+
+  full_join(uphop,dat22,by=NULL) %>%
+    full_join(dat23, by=NULL) %>%
+    full_join(dat24, by=NULL) %>%
+    full_join(dat25, by=NULL) %>%
+    full_join(uam, by=NULL) %>%
+    arrange(SEQN) %>% distinct() %>%
+    group_by(SEQN) %>%
+    tidyr::fill(names(.), .direction="downup") %>%
+    ungroup() %>% distinct() %>%
+    group_by(SEQN) %>%
+    slice(1) %>%
+    ungroup() -> deet
+}) -> deet
+
+# Only 1 row per SEQN
+stopifnot(
+  deet %>%
+    group_by(SEQN) %>%
+    summarise(total=n()) %>%
+    filter(total>1) %>% nrow()==0
+)
+
+# SEQNs for chemical data
+deet %>% arrange(SEQN) %>% pull(SEQN) %>% unique() -> chem_assoc_SEQN
+```
+
+Load other demographic data.
+
+```{r inputdata2, results = FALSE}
+bake(file="rds/occ.rds",{
+# Inputting occupational data
+# Vars: SEQN, OCD230, OCD231, OCD240, OCD241, OCD390, OCD391, OCD392
+  remove_all_labels(nhanes('OCQ')) %>%
+    mutate(cycle = "1999-2000", SDDSRVYR = 1) -> occ_2000
+  remove_all_labels(nhanes('OCQ_B')) %>%
+    mutate(cycle = "2001-2002", SDDSRVYR = 2) -> occ_2002
+  remove_all_labels(nhanes('OCQ_C')) %>%
+    mutate(cycle = "2003-2004", SDDSRVYR = 3) -> occ_2004
+  remove_all_labels(nhanes('OCQ_D')) %>%
+    mutate(cycle = "2005-2006", SDDSRVYR = 4) -> occ_2006
+  remove_all_labels(nhanes('OCQ_E')) %>%
+    mutate(cycle = "2007-2008", SDDSRVYR = 5) -> occ_2008
+  remove_all_labels(nhanes('OCQ_F')) %>%
+    mutate(cycle = "2009-2010", SDDSRVYR = 6) -> occ_2010
+  remove_all_labels(nhanes('OCQ_G')) %>%
+    mutate(cycle = "2011-2012", SDDSRVYR = 7) -> occ_2012
+  remove_all_labels(nhanes('OCQ_H')) %>%
+    mutate(cycle = "2013-2014", SDDSRVYR = 8) -> occ_2014
+  # occ_2016 <- nhanes('OCQ_I')
+
+  full_join(occ_2000,occ_2002,by=NULL) %>%
+    full_join(occ_2004, by=NULL) %>%
+    full_join(occ_2006, by=NULL) %>%
+    full_join(occ_2008, by=NULL) %>%
+    full_join(occ_2010, by=NULL) %>%
+    full_join(occ_2012, by=NULL) %>%
+    full_join(occ_2014, by=NULL) %>%
+    arrange_all(desc) %>% distinct() %>%
+    dplyr::select(SEQN, cycle, SDDSRVYR, OCD230, OCD231, OCD240, OCD241, OCD390, OCD391, OCD392) %>%
+    filter(!is.na(OCD230) | !is.na(OCD231) | !is.na(OCD240) | !is.na(OCD241) | 
+           !is.na(OCD390) | !is.na(OCD391) | !is.na(OCD392)) %>%
+    mutate(farmwork = case_when(
+      OCD230 %in% c(1,2) ~ 1,
+      OCD231 ==   1      ~ 1,
+      OCD390 %in% c(1,2) ~ 1,
+      OCD391 ==   1      ~ 1,
+      OCD392 ==   18     ~ 1,
+      TRUE               ~ 0
+    ),
+    farmwork_sp = case_when(
+      OCD230 %in% c(1,2) ~ 1,
+      OCD231 ==   1      ~ 1,
+      OCD240 %in% c(1,2) ~ 1,
+      OCD241 ==   18     ~ 1,
+      OCD390 %in% c(1,2) ~ 1,
+      OCD391 ==   1      ~ 1,
+      OCD392 ==   18     ~ 1,
+      TRUE               ~ 0
+    )) %>%
+    filter(SEQN %in% chem_assoc_SEQN) -> occ
+  }) -> occ
+
+# Only 1 row per SEQN
+stopifnot(
+  occ %>%
+    group_by(SEQN) %>%
+    summarise(total=n()) %>%
+    filter(total>1) %>% nrow()==0
+)
+
+# CBC
+# cbc_2000 <- nhanes('LAB25')
+# cbc_2002 <- nhanes('L25_B')
+# cbc_2004 <- nhanes('L25_C')
+# cbc_2006 <- nhanes('CBC_D')
+# cbc_2008 <- nhanes('CBC_E')
+# cbc_2010 <- nhanes('CBC_F')
+# cbc_2012 <- nhanes('CBC_G')  #double check this dataset
+# cbc_2014 <- nhanes('CBC_H')
+# cbc_2016 <- nhanes('CBC_I')
+
+bake(file="rds/bmi.rds",{
+  # BMI dataset
+  # Vars: SEQN, BMXBMI
+  remove_all_labels(nhanes('BMX')) %>%
+    mutate(cycle = "1999-2000", SDDSRVYR = 1) -> bmi2000
+  remove_all_labels(nhanes('BMX_B')) %>%
+    mutate(cycle = "2001-2002", SDDSRVYR = 2) -> bmi2002
+  remove_all_labels(nhanes('BMX_C')) %>%
+    mutate(cycle = "2003-2004", SDDSRVYR = 3) -> bmi2004
+  remove_all_labels(nhanes('BMX_D')) %>%
+    mutate(cycle = "2005-2006", SDDSRVYR = 4) -> bmi2006
+  remove_all_labels(nhanes('BMX_E')) %>%
+    mutate(cycle = "2007-2008", SDDSRVYR = 5) -> bmi2008
+  remove_all_labels(nhanes('BMX_F')) %>%
+    mutate(cycle = "2009-2010", SDDSRVYR = 6) -> bmi2010
+  remove_all_labels(nhanes('BMX_G')) %>%
+    mutate(cycle = "2011-2012", SDDSRVYR = 7) -> bmi2012
+  remove_all_labels(nhanes('BMX_H')) %>%
+    mutate(cycle = "2013-2014", SDDSRVYR = 8) -> bmi2014
+  # bmi2016 <- nhanes('BMX_I')
+
+  full_join(bmi2000,bmi2002,by=NULL) %>%
+    full_join(bmi2004, by=NULL) %>%
+    full_join(bmi2006, by=NULL) %>%
+    full_join(bmi2008, by=NULL) %>%
+    full_join(bmi2010, by=NULL) %>%
+    full_join(bmi2012, by=NULL) %>%
+    full_join(bmi2014, by=NULL) %>%
+    arrange_all(desc) %>% distinct() %>%
+    dplyr::select(SEQN, cycle, BMXBMI) %>%
+    filter(!is.na(BMXBMI)) %>%
+    filter(SEQN %in% chem_assoc_SEQN) -> bmi
+}) -> bmi
+
+stopifnot(
+  bmi %>%
+    group_by(SEQN) %>%
+    summarise(total=n()) %>%
+    filter(total>1) %>% nrow()==0
+)
+```
+
+Combine to final large dataset.
+
+```{r combodata}
+bake(file="rds/nhanes_all_dat.rds",{
+  #merging datsets with the same variables
+  full_join(deet, occ, by=NULL) %>%
+    full_join(bmi, by=NULL) %>%
+    arrange_all(desc) %>% distinct() %>%
+    group_by(SEQN) %>%
+    tidyr::fill(names(.), .direction="downup") %>%
+    ungroup() %>% distinct() %>%
+    group_by(SEQN) %>%
+    slice(1) %>%
+    ungroup() %>%
+    mutate(edu = DMDEDUC2,
+           edu = case_when(
+      DMDEDUC3 %in% c(1:8,55,66) ~ 1,
+      DMDEDUC3 %in% c(9:12)      ~ 2,
+      DMDEDUC3 %in% c(13:14)     ~ 3,
+      DMDEDUC3 ==   15           ~ 4,
+      DMDEDUC3 %in% c(77,99)     ~ NA_real_,
+      DMDEDUC2 %in% c(7,9)       ~ NA_real_,
+      TRUE                       ~ as.numeric(DMDEDUC2)
+     )) %>%
+    mutate(
+           #URXCPF   = URXCPM,
+           #URXCPO   = URXCPM,
+           URDCPFLC = URDCPMLC,
+           URDCPOLC = URDCPMLC,
+           LBXBHC   = coalesce(LBXBHC, LBDBHC),
+           LBXBHCLA = coalesce(LBXBHCLA, LBDBHCLA)) %>%
+    rename(LBX199   = LBD199,
+           URXSIM   = URXSISM) %>%
+    dplyr::select(-LBDBHC, -LBDBHCLA) -> all_dat
+}) -> all_dat
+
+# Only 1 row per SEQN
+stopifnot(
+  all_dat %>%
+    group_by(SEQN) %>%
+    summarise(total=n()) %>%
+    filter(total>1) %>% nrow()==0
+)
+```
+
+## Create weighting variables
+
+Create weighting variables to be used for the chemicals.
+
+```{r weights}
+# raw, lipid adjusted, positive= LA, LC
+all_dat %>%
+  dplyr::select(!starts_with(c("WTI","WTMR","SIA",
+                               "MIA","FIA","AIA","DMQ"))) %>%
+  mutate(
+    WTMEC16YR = case_when(
+      SDDSRVYR %in% c(1,2)   ~ (2/8)*WTMEC4YR, # for 1999-2002
+      SDDSRVYR %in% c(3:8)   ~ (1/8)*WTMEC2YR, # for 2003-2014
+      TRUE                   ~ NA_real_),
+    WT_LBXBHC = ifelse(is.finite(LBXBHC), case_when(
+      SDDSRVYR %in% c(1,2)   ~ (2/3)*WTSPO4YR, # for 1999-2002
+      SDDSRVYR %in% c(3)     ~ (1/3)*WTSB2YR,  # for 2003-2004
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_LBXDIE = ifelse(is.finite(LBXDIE), case_when(
+      SDDSRVYR %in% c(2)     ~ (1/2)*WTSPO2YR, # for 2001-2002
+      SDDSRVYR %in% c(3)     ~ (1/2)*WTSB2YR,  # for 2003-2004
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_LBXHPE = ifelse(is.finite(LBXHPE), case_when(
+      SDDSRVYR %in% c(1,2)   ~ (2/3)*WTSPO4YR, # for 1999-2002
+      SDDSRVYR %in% c(3)     ~ (1/3)*WTSB2YR,  # for 2003-2004
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_LBXPDE = ifelse(is.finite(LBXPDE), case_when(
+      SDDSRVYR %in% c(1,2)   ~ (2/3)*WTSPO4YR, # for 1999-2002
+      SDDSRVYR %in% c(3)     ~ (1/3)*WTSB2YR,  # for 2003-2004
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_LBXPDT = ifelse(is.finite(LBXPDT), case_when(
+      SDDSRVYR %in% c(1,2)   ~ (2/3)*WTSPO4YR, # for 1999-2002
+      SDDSRVYR %in% c(3)     ~ (1/3)*WTSB2YR,  # for 2003-2004
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_URX24D = ifelse(is.finite(URX24D), case_when(
+      SDDSRVYR %in% c(1,2)   ~ (2/6)*WTSPP4YR, # for 1999-2002
+      SDDSRVYR %in% c(3,6:8) ~ (1/6)*WTSC2YR,  # for 2003-2004, 2009-2014
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_URXDEA = ifelse(is.finite(URXDEA), case_when(
+      SDDSRVYR %in% c(5:8)   ~ (1/4)*WTSC2YR,  # for 2007-2014
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_URXOPM = ifelse(is.finite(URXOPM), case_when(
+      SDDSRVYR %in% c(1,2)   ~ (2/5)*WTSPP4YR, # for 1999-2002
+      SDDSRVYR %in% c(6:8)   ~ (1/5)*WTSC2YR,  # for 2009-2014
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_URXPAR = ifelse(is.finite(URXPAR), case_when(
+      SDDSRVYR %in% c(1,2)   ~ (2/5)*WTSPP4YR, # for 1999-2002
+      SDDSRVYR %in% c(6:8)   ~ (1/5)*WTSC2YR,  # for 2009-2014
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_URXCPM = ifelse(is.finite(URXCPM), case_when(
+      SDDSRVYR %in% c(1,2)   ~ (2/4)*WTSPP4YR, # for 1999-2002
+      SDDSRVYR %in% c(6,8)   ~ (1/4)*WTSC2YR,  # for 2009-2010, 2013-2014
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    # WT_URXCPF = ifelse(is.finite(URXCPF), case_when(
+    #   SDDSRVYR %in% c(1,2)   ~ (2/4)*WTSPP4YR, # for 1999-2002
+    #   SDDSRVYR %in% c(6,8)   ~ (1/4)*WTSC2YR,  # for 2009-2010, 2013-2014
+    #   TRUE                   ~ NA_real_
+    # ), NA_real_),
+    # WT_URXCPO = ifelse(is.finite(URXCPO), case_when(
+    #   SDDSRVYR %in% c(1,2)   ~ (2/4)*WTSPP4YR, # for 1999-2002
+    #   SDDSRVYR %in% c(6,8)   ~ (1/4)*WTSC2YR,  # for 2009-2010, 2013-2014
+    #   TRUE                   ~ NA_real_
+    # ), NA_real_),
+    WT_MEC_URX14D = ifelse(is.finite(URX14D), case_when(
+      SDDSRVYR %in% c(3:7)   ~ (1/5)*WTMEC2YR,  # for 2004-2012 (all URX14D)
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_A_URX14D = ifelse(is.finite(URX14D), case_when(
+      SDDSRVYR %in% c(7)     ~ WTSA2YR,         # for 2011-2012 (subsample A)
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_B_URX14D = ifelse(is.finite(URX14D), case_when(
+      SDDSRVYR %in% c(4:6)   ~ WTSB2YR,         # for 2005-2010 (subsample B)
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_C_URX14D = ifelse(is.finite(URX14D), case_when(
+      SDDSRVYR %in% c(3)     ~ WTSC2YR,         # for 2003-2004 (subsample C)
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_MEC_URXDCB = ifelse(is.finite(URXDCB), case_when(
+      SDDSRVYR %in% c(3:7)   ~ (1/5)*WTMEC2YR,  # for 2004-2012 (all URXDCB)
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_A_URXDCB = ifelse(is.finite(URXDCB), case_when(
+      SDDSRVYR %in% c(7)     ~ WTSA2YR,         # for 2011-2012 (subsample A)
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_B_URXDCB = ifelse(is.finite(URXDCB), case_when(
+      SDDSRVYR %in% c(4:6)   ~ WTSB2YR,         # for 2005-2010 (subsample B)
+      TRUE                   ~ NA_real_
+    ), NA_real_),
+    WT_C_URXDCB = ifelse(is.finite(URXDCB), case_when(
+      SDDSRVYR %in% c(3)     ~ WTSC2YR,         # for 2003-2004 (subsample C)
+      TRUE                   ~ NA_real_
+    ), NA_real_)) -> all_dat2
+
+data.frame(matrix(c("LBXBHC", "LBXDIE", "LBXHPE", "LBXPDE", "LBXPDT",
+                    "URX24D", "URXDEA", "URXOPM", "URXPAR", "URXCPM",
+                    #"URXCPF", "URXCPO",
+                    "URX14D", "URX14D", "URX14D",
+                    "URX14D", "URXDCB", "URXDCB", "URXDCB", "URXDCB",
+                    "WT_LBXBHC", "WT_LBXDIE", "WT_LBXHPE", "WT_LBXPDE", "WT_LBXPDT",
+                    "WT_URX24D", "WT_URXDEA", "WT_URXOPM", "WT_URXPAR", "WT_URXCPM",
+                    #"WT_URXCPF", "WT_URXCPO",
+                    "WT_MEC_URX14D", "WT_A_URX14D", "WT_B_URX14D", "WT_C_URX14D",
+                    "WT_MEC_URXDCB", "WT_A_URXDCB", "WT_B_URXDCB", "WT_C_URXDCB"), ncol=2)) %>%
+  rename(chemical = X1, weight= X2) -> chem_weight_names
+```
+
+## Format data
+
+Extend chemical data into a long format.
+
+Several chemicals do not have LC values:
+
+```{r chem_long}
+bake(file="rds/chem_long.rds",{
+  # LBs
+  all_dat2 %>%
+    dplyr::select(SEQN,starts_with("LB")) %>%
+    dplyr::select(SEQN,ends_with("LC")) %>%
+    gather(key=chemical,value=LC, -SEQN) %>%
+    filter(!is.na(LC)) %>%
+    mutate(chemical = stringr::str_replace(chemical, "^LBD", "LBX"),
+           chemical = stringr::str_replace(chemical, "LC$", "")) -> dat_lblc
+
+  all_dat2 %>%
+    dplyr::select(SEQN,starts_with("LB")) %>%
+    dplyr::select(SEQN,ends_with("LA")) %>%
+    gather(key=chemical,value=LA, -SEQN) %>%
+    filter(!is.na(LA)) %>%
+    mutate(chemical = stringr::str_replace(chemical, "LA$", "")) -> dat_lbla
+
+  all_dat2 %>%
+    dplyr::select(SEQN,starts_with("LB")) %>%
+    dplyr::select(!ends_with(c("LA","LC"))) %>%
+    gather(key=chemical,value=measurement, -SEQN) %>%
+    filter(!is.na(measurement)) %>%
+    full_join(dat_lbla) %>%
+    full_join(dat_lblc) -> dat_lb
+
+  # URs
+  all_dat2 %>%
+    dplyr::select(SEQN,starts_with("UR")) %>%
+    dplyr::select(-URXUCR) %>%
+    dplyr::select(SEQN,ends_with("LC")) %>%
+    gather(key=chemical,value=LC, -SEQN) %>%
+    filter(!is.na(LC)) %>%
+    mutate(chemical = stringr::str_replace(chemical, "^URD", "URX"),
+           chemical = stringr::str_replace(chemical, "LC$", "")) -> dat_urlc
+
+  all_dat2 %>%
+    dplyr::select(SEQN,starts_with("UR")) %>%
+    dplyr::select(!ends_with("LC")) %>%
+    dplyr::select(-URXUCR) %>%
+    gather(key=chemical,value=measurement, -SEQN) %>%
+    filter(!is.na(measurement)) %>%
+    mutate(LA = NA_real_) %>%
+    full_join(dat_urlc) -> dat_ur
+
+  # All chemicals
+  rbind(dat_lb, dat_ur) -> chem_long
+}) -> chem_long
+
+# Do not have LC values
+chem_long %>% filter(is.na(LC)) %>% pull(chemical) %>% unique()
+```
+
+Demographic data.
+
+```{r createvars}
+# Everything else
+all_dat2 %>%
+  dplyr::select(URXUCR) -> URXUCR
+
+all_dat2 %>%
+  dplyr::select(!starts_with("UR")) %>%
+  dplyr::select(!starts_with("LB")) %>%
+  dplyr::select(SEQN, SDDSRVYR, SDMVPSU, SDMVSTRA,
+                farmwork, farmwork_sp, DMDCITZN, edu, 
+                BMXBMI, RIDAGEYR, INDFMPIR, RIAGENDR,
+                RIDRETH1, DMDBORN, WTMEC16YR, starts_with("WT_")) %>%
+  cbind(URXUCR) %>%
+  mutate(DMDCITZN = ifelse(DMDCITZN %in% c(7,9), NA_real_, DMDCITZN),
+         DMDCITZN = ifelse(DMDCITZN ==1, 0, DMDCITZN), #citizen=0
+         DMDCITZN = ifelse(DMDCITZN ==2, 1, DMDCITZN), #non-citizen=1
+         DMDCITZN = as.factor(DMDCITZN),
+         farmwork = as.factor(farmwork)) -> demo_dat
+```
+
+## Load Toxcats and molecular weights datasets
+
+Load toxcast data.
+
+```{r toxcast, warning=FALSE}
+read_delim("data/pestsheet_convert.csv", delim=",",
+           col_names=TRUE,
+           col_types = "cccnciciinncnnnncncccc")->mw
+
+readRDS("data/Pesticide_Toxcast_5-3-21.rds") %>%
+  dplyr::select(aenm, casn, chnm, hitc, modl_acc, IntendedTargetFamily,
+                IntendedTargetFamilySub, GeneName, GeneSymbol) %>%
+  group_by(casn, IntendedTargetFamily) %>%
+  mutate(target_min_log = min(modl_acc, na.rm = TRUE),
+         target_max_log = max(modl_acc, na.rm = TRUE),
+         target_min_log = ifelse(is.finite(target_min_log), target_min_log, NA_real_),
+         target_max_log = ifelse(is.finite(target_max_log), target_max_log, NA_real_)) %>%
+  ungroup() %>%
+  group_by(casn) %>%
+  mutate(chem_min_log = min(modl_acc, na.rm = TRUE),
+         chem_max_log = max(modl_acc, na.rm = TRUE),
+         chem_min_log = ifelse(is.finite(chem_min_log), chem_min_log, NA_real_),
+         chem_max_log = ifelse(is.finite(chem_max_log), chem_max_log, NA_real_)) %>%
+  ungroup() %>%
+  full_join(mw %>% dplyr::select(chemical, casn, mw,
+                            conversion, density=Density)) -> toxcast
+```
+
+## Calculate molarity
+
+Calculate molarity for the chemicals.
+
+For blood measurements (LBX), lipid adjusted measurements (LBXLA) have units of $\frac{\mathrm{ng}}{\mathrm{g}}$. We are given molecular weights ($mw$) as $\frac{\mathrm{g}}{\mathrm{mol}}$ and a [serum density of 1.024](https://pubs.acs.org/doi/10.1021/ac50045a052)
+ $\frac{\mathrm{g}}{\mathrm{mL}}$. And so our conversion will look like:
+
+$$ \frac{\mathrm{LBXLA} \cancel{\mathrm{ng}}}{\cancel{\mathrm{g}}} \cdot \frac{1 \cancel{\mathrm{g}}}{10^9 \cancel{\mathrm{ng}}} \frac{1 \cancel{\mathrm{mol}}}{mw \cancel{\mathrm{g}}} \cdot \frac{1.024 \cancel{\mathrm{g}}}{1 \cancel{\mathrm{mL}}} \cdot \frac{10^3 \cancel{\mathrm{mL}}}{1 \mathrm{L}} \cdot \frac{10^6 \mathrm{\mu mol}}{1 \cancel{\mathrm{mol}}} = \frac{\mathrm{LBXLA} \cdot 1.024}{mw} \frac{\mathrm{\mu mol}}{\mathrm{L}} $$
+
+Most urinary measurements (URX) have units of $\frac{\mathrm{\mu g}}{\mathrm{L}}$. We are given molecular weights ($mw$) as $\frac{\mathrm{g}}{\mathrm{mol}}$. And so our conversion will look like:
+
+$$ \frac{\mathrm{URX} \cancel{\mathrm{\mu g}}}{\cancel{\mathrm{L}}} \cdot \frac{1 \cancel{\mathrm{g}}}{10^6 \cancel{\mathrm{\mu g}}} \frac{1 \cancel{\mathrm{mol}}}{mw \cancel{\mathrm{g}}} \cdot \frac{10^6 \mathrm{\mu mol}}{1 \cancel{\mathrm{mol}}} = \frac{\mathrm{URX}}{mw} \frac{\mathrm{\mu mol}}{\mathrm{L}} $$
+Creatinine (URXUCR) has units of $\frac{\mathrm{mg}}{\mathrm{dL}}$. We are given a molecular weight of $113.12 \frac{\mathrm{g}}{\mathrm{mol}}$. And so our conversion will look like:
+
+$$ \frac{\mathrm{URXUCR} \cancel{\mathrm{mg}}}{\cancel{\mathrm{dL}}} \cdot \frac{10 \cancel{\mathrm{dL}}}{1 \mathrm{L}} \cdot \frac{1 \cancel{\mathrm{g}}}{10^3 \cancel{\mathrm{mg}}} \frac{1 \cancel{\mathrm{mol}}}{113.12 \cancel{\mathrm{g}}} \cdot \frac{10^6 \mathrm{\mu mol}}{1 \cancel{\mathrm{mol}}} = \frac{\mathrm{URXUCR} \cdot 10^4}{113.12} \frac{\mathrm{\mu mol}}{\mathrm{L}} $$
+
+```{r molarity, warning=FALSE}
+chem_long %>%
+  left_join(toxcast %>%
+              dplyr::select(chemical, casn, chem_min_log, mw,
+                            conversion, density) %>%
+              arrange(chemical, chem_min_log) %>%
+              distinct()) %>%
+  mutate(molarity = 
+           #ifelse(is.finite(LA), LA/mw, measurement/mw)
+           case_when(
+             grepl('^UR', chemical) ~ (measurement/mw), # umol/L
+             grepl('^LB', chemical) ~ (LA/mw)*1.024, # umol/L
+             TRUE ~ NA_real_
+           )
+         ) %>%
+  mutate(indiv_chem_bioactiv = ifelse(log(molarity) >= chem_min_log, 1, 0)) %>%
+  group_by(SEQN) %>%
+  mutate(bioactiv_any = max(indiv_chem_bioactiv, na.rm = TRUE),
+         bioactiv_any = ifelse(is.finite(bioactiv_any), bioactiv_any, NA_real_),
+         bioactiv_count = sum(indiv_chem_bioactiv, na.rm = TRUE)) %>%
+  ungroup()  %>%
+  filter(!is.na(chem_min_log)) -> chem_long2
+
+# Creatinine molecular weight 113.12 mol/L, final molarity in umol/L
+left_join(chem_long2, demo_dat) %>%
+  mutate(URXUCR_umol = (URXUCR/113.12)*10000,
+         URXUCR_mol = URXUCR_umol/1000000,
+         molarity_log_ratio = log(molarity/URXUCR_umol)) -> full_chem_demo_dat
+
+saveRDS(full_chem_demo_dat, "~/projects/ColacinoLab/farmwork/rds/full_chem_demo_dat.rds")
+```
+
+# Data analysis
+
+## Non-parametric Wilcoxon-Mann-Whitney U
+
+The output for this model is log molarity of the chemical ($\frac{\mathrm{\mu mol}}{L}$) for LBX data and log ratio of the molarity of the chemical with the log molarity of creatine ($\frac{\mathrm{\mu mol}}{L}$) for URX data.
+
+```{r wilcoxon}
+chem_names <- as.character(chem_weight_names[,1])
+weight_names <- as.character(chem_weight_names[,2])
+
+desired_length <- length(chem_names)
+datalist <- vector(mode = "list", length = desired_length)
+
+# ROC equivalent
+auc_wmw2 <- function(labels, scores){
+  labels <- as.logical(labels)
+  n1 <- sum(labels)
+  n2 <- sum(!labels)
+  R1 <- sum(rank(scores)[labels])
+  U1 <- R1 - n1 * (n1 + 1)/2
+  U1/(n1 * n2)
+}
+
+for(i in seq(1:desired_length)) {
+  full_chem_demo_dat %>% dplyr::select(!starts_with("WT_")) -> temp_dat1
+  full_chem_demo_dat %>% dplyr::select(weight_names[i]) -> temp_dat2
+  colnames(temp_dat2) <- c("WT")
+  cbind(temp_dat1, temp_dat2) %>%
+    filter(!is.na(WT), chemical==chem_names[i]) -> temp_dat
+  
+  svydesign(strata  = temp_dat$SDMVSTRA, id   = temp_dat$SDMVPSU,
+            weights = temp_dat$WT,       data = temp_dat, nest=T) -> nhanes.svy
+  
+  if(grepl('^LB', chem_names[i])) {
+    temp_dat %>% filter(!is.na(farmwork), !is.na(molarity)) -> no.na.data.fw
+    no.na.data.fw %>%
+      mutate(molarity = log(molarity)) %>% pull(molarity) -> prediction_fw
+  
+    temp_dat %>% filter(!is.na(DMDCITZN), !is.na(molarity)) -> no.na.data.cz
+    no.na.data.cz %>%
+      mutate(molarity = log(molarity)) %>% pull(molarity) -> prediction_cz
+    
+    svyranktest(log(molarity) ~ farmwork, design = nhanes.svy,
+                na = TRUE,      test = c("wilcoxon")) -> fw
+    
+    svyranktest(log(molarity) ~ DMDCITZN, design = nhanes.svy,
+                na = TRUE,      test = c("wilcoxon")) -> cz
+  } else {
+    temp_dat %>% filter(!is.na(farmwork), !is.na(molarity_log_ratio)) -> no.na.data.fw
+    no.na.data.fw %>%
+      pull(molarity_log_ratio) -> prediction_fw
+  
+    temp_dat %>% filter(!is.na(DMDCITZN), !is.na(molarity_log_ratio)) -> no.na.data.cz
+    no.na.data.cz %>%
+      pull(molarity_log_ratio) -> prediction_cz
+    
+    svyranktest(molarity_log_ratio ~ farmwork, design = nhanes.svy,
+                na = TRUE,      test = c("wilcoxon")) -> fw
+    
+    svyranktest(molarity_log_ratio ~ DMDCITZN, design = nhanes.svy,
+                na = TRUE,      test = c("wilcoxon")) -> cz
+  }
+  
+  # Totals
+  no.na.data.fw %>% dplyr::select(SDMVSTRA, SEQN) %>%
+    group_by(SDMVSTRA) %>% summarise(n=as.numeric(n()))->Ntotal
+  as.data.frame(as.matrix(Ntotal))->Ntotal
+  round(svytable(~farmwork, nhanes.svy, Ntotal=Ntotal)[2]) -> estNgroup
+  no.na.data.fw %>% nrow() -> n
+  
+  no.na.data.cz %>% dplyr::select(SDMVSTRA, SEQN) %>%
+    group_by(SDMVSTRA) %>% summarise(n=as.numeric(n()))->Ntotal2
+  as.data.frame(as.matrix(Ntotal2))->Ntotal2
+  round(svytable(~DMDCITZN, nhanes.svy, Ntotal=Ntotal2)[2]) -> estNgroup2
+  no.na.data.cz %>% nrow() -> n2
+
+  # ROC
+  no.na.data.fw %>%
+    mutate(farmwork = as.numeric(farmwork), farmwork = ifelse(farmwork==1, 0, 1)) %>%
+    pull(farmwork) -> category_fw
+  auc_wmw2(category_fw, prediction_fw) -> auc_fw
+  
+  no.na.data.cz %>%
+    mutate(DMDCITZN = as.numeric(DMDCITZN), DMDCITZN = ifelse(DMDCITZN==1, 0, 1)) %>%
+    pull(DMDCITZN) -> category_cz
+  auc_wmw2(category_cz, prediction_cz) -> auc_cz
+  
+  data.frame(chem     = c(chem_names[i],   chem_names[i]),
+             variable = c("FarmWorker",    "NonCitizen"),
+             weight   = c(weight_names[i], weight_names[i]),
+             estNgroup= c(estNgroup,       estNgroup2),
+             N        = c(n       ,        n2),
+             t        = c(fw$statistic,    cz$statistic),
+             df       = c(fw$parameter,    cz$parameter),
+             ROC      = c(auc_fw,          auc_cz),
+             p        = c(fw$p.value,      cz$p.value)
+             ) -> data_rows
+  
+  datalist[[i]] <- data_rows
+}
+do.call(rbind, datalist) -> wilcoxon_results
+
+# Format for table
+wilcoxon_results %>%
+  mutate(p.fdr = p.adjust(p, method="fdr"),
+         p.fdr.sig = ifelse(p.fdr<0.05,"*","")) %>%
+  mutate(p = if_else(p < 0.01,
+                     formatC(p, digits = 4, format = "e"),
+                     formatC(p, digits = 4, format = "f", drop0trailing = FALSE)),
+         p.fdr = if_else(p.fdr < 0.01,
+                     formatC(p.fdr, digits = 4, format = "e"),
+                     formatC(p.fdr, digits = 4, format = "f", drop0trailing = FALSE)),
+  ) %>%
+  mutate_if(is.numeric, function(x) {
+    formatC(x, digits = 4, format = "f", drop0trailing = FALSE)
+  }) %>%
+  mutate(estNgroup =as.integer(estNgroup),
+         N =as.integer(N)) -> wilcoxon_table
+```
+
+### Non-parametric Wilcoxon-Mann-Whitney U table
+
+```{r wilcoxon_table}
+wilcoxon_table[-1] -> wilcoxon_table_sm
+
+kableExtra::kable(wilcoxon_table_sm, caption="Wilcoxon-Mann-Whitney U", booktabs = T, align = c("l","l","r","r","r","r","r","l","l","r")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  kableExtra::pack_rows("LBXBHC", 1, 2) %>%
+  kableExtra::pack_rows("LBXDIE", 3, 4) %>%
+  kableExtra::pack_rows("LBXHPE", 5, 6) %>%
+  kableExtra::pack_rows("LBXPDE", 7, 8) %>%
+  kableExtra::pack_rows("LBXPDT", 9, 10) %>%
+  kableExtra::pack_rows("URX24D", 11, 12) %>%
+  kableExtra::pack_rows("URXDEA", 13, 14) %>%
+  kableExtra::pack_rows("URXOPM", 15, 16) %>%
+  kableExtra::pack_rows("URXPAR", 17, 18) %>%
+  kableExtra::pack_rows("URXCPM", 19, 20) %>%
+  #kableExtra::pack_rows("URXCPF", 21, 22) %>%
+  #kableExtra::pack_rows("URXCPO", 23, 24) %>%
+  kableExtra::pack_rows("URX14D", 21, 28) %>%
+  kableExtra::pack_rows("URXDCB", 29, 36)
+```
+
+## Logistic regression
+
+Log molariry of creatine is added as an input variable for URX chemicals and left out for LBX chemicals.
+
+```{r logreg, warning=FALSE}
+suppressMessages(library(pROC))
+# Logreg for farmwork
+for(i in seq(1:desired_length)) {
+  full_chem_demo_dat %>% dplyr::select(!starts_with("WT_")) -> temp_dat1
+  full_chem_demo_dat %>% dplyr::select(weight_names[i]) -> temp_dat2
+  colnames(temp_dat2) <- c("WT")
+  cbind(temp_dat1, temp_dat2) %>%
+    filter(!is.na(WT), chemical==chem_names[i]) -> temp_dat
+  
+  temp_dat %>% filter(!is.na(indiv_chem_bioactiv), !is.na(farmwork),
+                      WT > 0) -> no.na.data
+  #no.na.data %>% select(indiv_chem_bioactiv) %>% distinct() %>% nrow() -> outcomes1
+  sum(no.na.data$indiv_chem_bioactiv)/length(no.na.data$indiv_chem_bioactiv) -> outcomes1
+  
+  if(grepl('^LB', chem_names[i])){
+    temp_dat %>% filter(!is.na(indiv_chem_bioactiv), !is.na(farmwork),
+                      !is.na(BMXBMI), !is.na(RIDAGEYR), !is.na(SDDSRVYR),
+                      !is.na(RIAGENDR), !is.na(edu), !is.na(RIDRETH1),
+                      WT > 0) -> no.na.data2
+  } else {
+    temp_dat %>% filter(!is.na(indiv_chem_bioactiv), !is.na(farmwork),
+                      !is.na(BMXBMI), !is.na(RIDAGEYR), !is.na(SDDSRVYR),
+                      !is.na(RIAGENDR), !is.na(edu), !is.na(RIDRETH1),
+                      !is.na(URXUCR_umol), WT > 0) -> no.na.data2
+  }
+  
+  #no.na.data2 %>% select(indiv_chem_bioactiv) %>% distinct() %>% nrow() -> outcomes2
+  sum(no.na.data2$indiv_chem_bioactiv)/length(no.na.data2$indiv_chem_bioactiv) -> outcomes2
+  
+  svydesign(strata  = no.na.data$SDMVSTRA, id   = no.na.data$SDMVPSU,
+            weights = no.na.data$WT,       data = no.na.data, nest=T) -> nhanes.svy
+  no.na.data %>% dplyr::select(SDMVSTRA, SEQN) %>%
+    group_by(SDMVSTRA) %>% summarise(n=as.numeric(n()))->Ntotal
+  as.data.frame(as.matrix(Ntotal))->Ntotal
+  round(svytable(~farmwork, nhanes.svy, Ntotal=Ntotal)[2]) -> estNgroup
+  no.na.data %>% nrow() -> n
+  
+  svydesign(strata  = no.na.data2$SDMVSTRA, id   = no.na.data2$SDMVPSU,
+            weights = no.na.data2$WT,       data = no.na.data2, nest=T) -> nhanes.svy2
+  no.na.data2 %>% dplyr::select(SDMVSTRA, SEQN) %>%
+    group_by(SDMVSTRA) %>% summarise(n=as.numeric(n()))->Ntotal2
+  as.data.frame(as.matrix(Ntotal2))->Ntotal2
+  round(svytable(~farmwork, nhanes.svy2, Ntotal=Ntotal2)[2]) -> estNgroup2
+  no.na.data2 %>% nrow() -> n2
+  
+  if (min(outcomes1,outcomes2)<0.015) {
+      data.frame(chem     = c(chem_names[i],   chem_names[i]),
+                 model    = c("Unadjusted",    "Adjusted"),
+                 variable = c("FarmWorker",    "FarmWorker"),
+                 weight   = c(weight_names[i], weight_names[i]),
+                 estNgroup= c(estNgroup,       estNgroup2),
+                 N        = c(n       ,        n2),
+                 OR       = c(NA_real_,        NA_real_),
+                 CI_2.5   = c(NA_real_,        NA_real_),
+                 CI_97.5  = c(NA_real_,        NA_real_),
+                 t        = c(NA_real_,        NA_real_),
+                 #maxVIF   = c(NA_real_,        NA_real_),
+                 ROC      = c(NA_real_,        NA_real_),
+                 p        = c(NA_real_,        NA_real_)
+                 ) -> data_rows
+    } else {
+      
+      #model included
+      svyglm(indiv_chem_bioactiv ~ farmwork, design=nhanes.svy,
+             family = quasibinomial(link = "logit")) -> fw_raw
+      
+      #model included
+      if(grepl('^LB', chem_names[i])){
+        svyglm(indiv_chem_bioactiv ~ farmwork + BMXBMI + RIDAGEYR + SDDSRVYR +
+                 factor(RIAGENDR) + factor(edu) + factor(RIDRETH1),
+               design = nhanes.svy2, family = quasibinomial(link = "logit")) -> fw_adj
+      } else {
+        svyglm(indiv_chem_bioactiv ~ farmwork + BMXBMI + RIDAGEYR + SDDSRVYR +
+                 factor(RIAGENDR) + factor(edu) + factor(RIDRETH1) + log(URXUCR_umol),
+               design = nhanes.svy2, family = quasibinomial(link = "logit")) -> fw_adj
+      }
+      
+      # Max VIF
+      #max(summ(fw_adj, vifs=TRUE)$coeftable[,5], na.rm=TRUE) -> vif_fw_adj
+      
+      # Discrimination (ROC)
+      tp.fp_raw <- WeightedROC(fitted(fw_raw),nhanes.svy$variables$indiv_chem_bioactiv,  no.na.data$WT)
+      WeightedAUC(tp.fp_raw) -> roc_raw
+      tp.fp_adj <- WeightedROC(fitted(fw_adj),nhanes.svy2$variables$indiv_chem_bioactiv,  no.na.data2$WT)
+      WeightedAUC(tp.fp_adj) -> roc_adj
+      
+        data.frame(chem     = c(chem_names[i],   chem_names[i]),
+                   model    = c("Unadjusted",    "Adjusted"),
+                   variable = c("FarmWorker",    "FarmWorker"),
+                   weight   = c(weight_names[i], weight_names[i]),
+                   estNgroup= c(estNgroup,       estNgroup2),
+                   N        = c(n       ,        n2),
+                   OR       = c(exp(coefficients(fw_raw)[2]),
+                                exp(coefficients(fw_adj)[2])),
+                   CI_2.5   = c(exp(confint(fw_raw))[2,1],
+                                exp(confint(fw_adj))[2,1]),
+                   CI_97.5  = c(exp(confint(fw_raw))[2,2],
+                                exp(confint(fw_adj))[2,2]),
+                   t        = c(summary(fw_raw)$coefficients[2,3],
+                                summary(fw_adj)$coefficients[2,3]),
+                   #maxVIF   = c(NA_real_, vif_fw_adj),
+                   ROC      = c(roc_raw,
+                                roc_adj),
+                   p        = c(summary(fw_raw)$coefficients[2,4],
+                                summary(fw_adj)$coefficients[2,4])
+                   ) -> data_rows
+      }
+
+  datalist[[i]] <- data_rows
+  #print(i)
+}
+do.call(rbind, datalist) -> logreg_results_fw
+
+# Logreg for non-Citizen
+for(i in seq(1:desired_length)) {
+  full_chem_demo_dat %>% dplyr::select(!starts_with("WT_")) -> temp_dat1
+  full_chem_demo_dat %>% dplyr::select(weight_names[i]) -> temp_dat2
+  colnames(temp_dat2) <- c("WT")
+  cbind(temp_dat1, temp_dat2) %>%
+    filter(!is.na(WT), chemical==chem_names[i]) -> temp_dat
+
+  temp_dat %>%
+    filter(!is.na(indiv_chem_bioactiv), !is.na(DMDCITZN),
+                      WT > 0) -> no.na.data
+  #no.na.data %>% select(indiv_chem_bioactiv) %>% distinct() %>% nrow() -> outcomes1
+  sum(no.na.data$indiv_chem_bioactiv)/length(no.na.data$indiv_chem_bioactiv) -> outcomes1
+  
+  if(grepl('^LB', chem_names[i])){
+    temp_dat %>%
+      filter(!is.na(indiv_chem_bioactiv), !is.na(DMDCITZN),
+             !is.na(BMXBMI), !is.na(RIDAGEYR), !is.na(SDDSRVYR),
+             !is.na(RIAGENDR), !is.na(edu), !is.na(RIDRETH1),
+             WT > 0) -> no.na.data2
+  } else {
+    temp_dat %>%
+      filter(!is.na(indiv_chem_bioactiv), !is.na(DMDCITZN),
+             !is.na(BMXBMI), !is.na(RIDAGEYR), !is.na(SDDSRVYR),
+             !is.na(RIAGENDR), !is.na(edu), !is.na(RIDRETH1),
+             !is.na(URXUCR_umol), WT > 0) -> no.na.data2
+  }
+
+  #no.na.data2 %>% select(indiv_chem_bioactiv) %>% distinct() %>% nrow() -> outcomes2
+  sum(no.na.data2$indiv_chem_bioactiv)/length(no.na.data2$indiv_chem_bioactiv) -> outcomes2
+  
+  svydesign(strata  = no.na.data$SDMVSTRA, id   = no.na.data$SDMVPSU,
+            weights = no.na.data$WT,       data = no.na.data, nest=T) -> nhanes.svy
+  no.na.data %>% dplyr::select(SDMVSTRA, SEQN) %>%
+    group_by(SDMVSTRA) %>% summarise(n=as.numeric(n()))->Ntotal
+  as.data.frame(as.matrix(Ntotal))->Ntotal
+  round(svytable(~farmwork, nhanes.svy, Ntotal=Ntotal)[2]) -> estNgroup
+  no.na.data %>% nrow() -> n
+  
+  svydesign(strata  = no.na.data2$SDMVSTRA, id   = no.na.data2$SDMVPSU,
+            weights = no.na.data2$WT,       data = no.na.data2, nest=T) -> nhanes.svy2
+  no.na.data2 %>% dplyr::select(SDMVSTRA, SEQN) %>%
+    group_by(SDMVSTRA) %>% summarise(n=as.numeric(n()))->Ntotal2
+  as.data.frame(as.matrix(Ntotal2))->Ntotal2
+  round(svytable(~farmwork, nhanes.svy2, Ntotal=Ntotal2)[2]) -> estNgroup2
+  no.na.data2 %>% nrow() -> n2
+
+  if (min(outcomes1,outcomes2)<0.015) {
+      data.frame(chem     = c(chem_names[i],   chem_names[i]),
+                 model    = c("Unadjusted",    "Adjusted"),
+                 variable = c("NonCitizen",    "NonCitizen"),
+                 weight   = c(weight_names[i], weight_names[i]),
+                 estNgroup= c(estNgroup,       estNgroup2),
+                 N        = c(n       ,        n2),
+                 OR       = c(NA_real_,        NA_real_),
+                 CI_2.5   = c(NA_real_,        NA_real_),
+                 CI_97.5  = c(NA_real_,        NA_real_),
+                 t        = c(NA_real_,        NA_real_),
+                 ROC      = c(NA_real_,        NA_real_),
+                 p        = c(NA_real_,        NA_real_)
+                 ) -> data_rows
+    } else {
+      
+      #svydesign(strata  = temp_dat$SDMVSTRA, id   = temp_dat$SDMVPSU,
+      #          weights = temp_dat$WT,       data = temp_dat, nest=T) -> nhanes.svy
+      
+      #include
+      svyglm(indiv_chem_bioactiv ~ DMDCITZN, design=nhanes.svy,
+             family = quasibinomial(link = "logit")) -> cz_raw
+      
+      #include
+      if(grepl('^LB', chem_names[i])) {
+        svyglm(indiv_chem_bioactiv ~ DMDCITZN + BMXBMI + RIDAGEYR + SDDSRVYR +
+                 factor(RIAGENDR) + factor(edu) + factor(RIDRETH1),
+               design = nhanes.svy2, family = quasibinomial(link = "logit")) -> cz_adj
+      } else {
+        svyglm(indiv_chem_bioactiv ~ DMDCITZN + BMXBMI + RIDAGEYR + SDDSRVYR +
+                 factor(RIAGENDR) + factor(edu) + factor(RIDRETH1) + log(URXUCR_umol),
+               design = nhanes.svy2, family = quasibinomial(link = "logit")) -> cz_adj
+      }
+      
+      # Discrimination (ROC)
+      #roc(nhanes.svy$variables$indiv_chem_bioactiv ~ fitted(cz_raw), plot = F) -> roc_raw
+      #roc(nhanes.svy2$variables$indiv_chem_bioactiv ~ fitted(cz_adj), plot = F) -> roc_adj
+      tp.fp_raw <- WeightedROC(fitted(cz_raw),nhanes.svy$variables$indiv_chem_bioactiv,  no.na.data$WT)
+      WeightedAUC(tp.fp_raw) -> roc_raw
+      tp.fp_adj <- WeightedROC(fitted(cz_adj),nhanes.svy2$variables$indiv_chem_bioactiv,  no.na.data2$WT)
+      WeightedAUC(tp.fp_adj) -> roc_adj
+      
+        data.frame(chem     = c(chem_names[i],   chem_names[i]),
+                   model    = c("Unadjusted",    "Adjusted"),
+                   variable = c("NonCitizen",    "NonCitizen"),
+                   weight   = c(weight_names[i], weight_names[i]),
+                   estNgroup= c(estNgroup,       estNgroup2),
+                   N        = c(n       ,        n2),
+                   OR       = c(exp(coefficients(cz_raw)[2]),
+                                exp(coefficients(cz_adj)[2])),
+                   CI_2.5   = c(exp(confint(cz_raw))[2,1],
+                                exp(confint(cz_adj))[2,1]),
+                   CI_97.5  = c(exp(confint(cz_raw))[2,2],
+                                exp(confint(cz_adj))[2,2]),
+                   t        = c(summary(cz_raw)$coefficients[2,3],
+                                summary(cz_adj)$coefficients[2,3]),
+                   ROC      = c(roc_raw,
+                                roc_adj),
+                   p        = c(summary(cz_raw)$coefficients[2,4],
+                                summary(cz_adj)$coefficients[2,4])
+                   ) -> data_rows
+      }
+  
+  datalist[[i]] <- data_rows
+  #print(i)
+}
+do.call(rbind, datalist) -> logreg_results_cz
+
+# Organize into unadjusted and adjusted tables
+logreg_results_fw %>%
+  filter(model == "Unadjusted") %>%
+  mutate(order = 1, order = cumsum(order)) -> logreg_results_fw_raw
+logreg_results_fw %>%
+  filter(model == "Adjusted") %>%
+  mutate(order = 1, order = cumsum(order)) -> logreg_results_fw_adj
+logreg_results_cz %>%
+  filter(model == "Unadjusted") %>%
+  mutate(order = 1, order = cumsum(order)) -> logreg_results_cz_raw
+logreg_results_cz %>%
+  filter(model == "Adjusted") %>%
+  mutate(order = 1, order = cumsum(order)) -> logreg_results_cz_adj
+
+rbind(logreg_results_fw_raw, logreg_results_cz_raw) %>%
+  arrange(order, variable) %>% dplyr::select(-order) -> logreg_results_raw
+rbind(logreg_results_fw_adj, logreg_results_cz_adj) %>%
+  arrange(order, variable) %>% dplyr::select(-order) -> logreg_results_adj
+
+
+# Format for tables
+logreg_results_raw %>%
+  mutate(p.fdr = p.adjust(p, method="fdr"),
+         p.fdr.sig = ifelse(p.fdr<0.05,"*","")) %>%
+  mutate(OR = if_else(OR < 0.0001,
+                     formatC(OR, digits = 4, format = "e"),
+                     formatC(OR, digits = 4, format = "f", drop0trailing = FALSE)),
+         CI_2.5 = if_else(CI_2.5 < 0.0001,
+                     formatC(CI_2.5, digits = 4, format = "e"),
+                     formatC(CI_2.5, digits = 4, format = "f", drop0trailing = FALSE)),
+         CI_97.5 = if_else(CI_97.5 < 0.0001,
+                     formatC(CI_97.5, digits = 4, format = "e"),
+                     formatC(CI_97.5, digits = 4, format = "f", drop0trailing = FALSE)),
+         p = if_else(p < 0.01,
+                     formatC(p, digits = 4, format = "e"),
+                     formatC(p, digits = 4, format = "f", drop0trailing = FALSE)),
+         p.fdr = if_else(p.fdr < 0.01,
+                         formatC(p.fdr, digits = 4, format = "e"),
+                         formatC(p.fdr, digits = 4, format = "f", drop0trailing = FALSE)),
+  ) %>%
+  mutate_if(is.numeric, function(x) {
+    formatC(x, digits = 4, format = "f", drop0trailing = FALSE)
+  }) %>%
+  mutate(estNgroup =as.integer(estNgroup),
+         N =as.integer(N)) -> logreg_table_raw
+
+logreg_results_adj %>%
+  mutate(p.fdr = p.adjust(p, method="fdr"),
+         p.fdr.sig = ifelse(p.fdr<0.05,"*","")) %>%
+  mutate(OR = if_else(OR < 0.0001,
+                     formatC(OR, digits = 4, format = "e"),
+                     formatC(OR, digits = 4, format = "f", drop0trailing = FALSE)),
+         CI_2.5 = if_else(CI_2.5 < 0.0001,
+                     formatC(CI_2.5, digits = 4, format = "e"),
+                     formatC(CI_2.5, digits = 4, format = "f", drop0trailing = FALSE)),
+         CI_97.5 = if_else(CI_97.5 < 0.0001,
+                     formatC(CI_97.5, digits = 4, format = "e"),
+                     formatC(CI_97.5, digits = 4, format = "f", drop0trailing = FALSE)),
+         p = if_else(p < 0.01,
+                     formatC(p, digits = 4, format = "e"),
+                     formatC(p, digits = 4, format = "f", drop0trailing = FALSE)),
+         p.fdr = if_else(p.fdr < 0.01,
+                         formatC(p.fdr, digits = 4, format = "e"),
+                         formatC(p.fdr, digits = 4, format = "f", drop0trailing = FALSE)),
+  ) %>%
+  mutate_if(is.numeric, function(x) {
+    formatC(x, digits = 4, format = "f", drop0trailing = FALSE)
+  }) %>%
+  mutate(estNgroup =as.integer(estNgroup),
+         N =as.integer(N)) -> logreg_table_adj
+```
+
+### Logistic regression table (unadjusted)
+
+```{r logreg_raw}
+logreg_table_raw[-c(1:2)] -> logreg_table_raw_sm
+
+# Unadjusted table
+kableExtra::kable(logreg_table_raw_sm,caption="Unadjusted Log Reg", booktabs = T, align = c("l","l","r","r","r","r","r","r","r","l","l","r")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  kableExtra::pack_rows("LBXBHC", 1, 2) %>%
+  kableExtra::pack_rows("LBXDIE", 3, 4) %>%
+  kableExtra::pack_rows("LBXHPE", 5, 6) %>%
+  kableExtra::pack_rows("LBXPDE", 7, 8) %>%
+  kableExtra::pack_rows("LBXPDT", 9, 10) %>%
+  kableExtra::pack_rows("URX24D", 11, 12) %>%
+  kableExtra::pack_rows("URXDEA", 13, 14) %>%
+  kableExtra::pack_rows("URXOPM", 15, 16) %>%
+  kableExtra::pack_rows("URXPAR", 17, 18) %>%
+  kableExtra::pack_rows("URXCPM", 19, 20) %>%
+  #kableExtra::pack_rows("URXCPF", 21, 22) %>%
+  #kableExtra::pack_rows("URXCPO", 23, 24) %>%
+  kableExtra::pack_rows("URX14D", 21, 28) %>%
+  kableExtra::pack_rows("URXDCB", 29, 36)
+```
+
+### Logistic regression table (adjusted)
+
+```{r logreg_adj}
+logreg_table_adj[-c(1:2)] -> logreg_table_adj_sm
+
+# Adjusted table
+kableExtra::kable(logreg_table_adj_sm,caption="Adjusted Log Reg", booktabs = T, align = c("l","l","r","r","r","r","r","r","r","l","l","r")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  kableExtra::pack_rows("LBXBHC", 1, 2) %>%
+  kableExtra::pack_rows("LBXDIE", 3, 4) %>%
+  kableExtra::pack_rows("LBXHPE", 5, 6) %>%
+  kableExtra::pack_rows("LBXPDE", 7, 8) %>%
+  kableExtra::pack_rows("LBXPDT", 9, 10) %>%
+  kableExtra::pack_rows("URX24D", 11, 12) %>%
+  kableExtra::pack_rows("URXDEA", 13, 14) %>%
+  kableExtra::pack_rows("URXOPM", 15, 16) %>%
+  kableExtra::pack_rows("URXPAR", 17, 18) %>%
+  kableExtra::pack_rows("URXCPM", 19, 20) %>%
+  #kableExtra::pack_rows("URXCPF", 21, 22) %>%
+  #kableExtra::pack_rows("URXCPO", 23, 24) %>%
+  kableExtra::pack_rows("URX14D", 21, 28) %>%
+  kableExtra::pack_rows("URXDCB", 29, 36)
+```
+
+## Models for consideration in manuscript
+
+### Non-parametric Wilcoxon-Mann-Whitney U
+
+```{r wilcoxon_table2}
+wilcoxon_table[-1] %>% filter(ROC>0.6, p.fdr.sig=="*") -> wilcoxon_table_sm2
+
+kableExtra::kable(wilcoxon_table_sm2, caption="Wilcoxon-Mann-Whitney U", booktabs = T, align = c("l","l","r","r","r","r","r","l","l","r")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  kableExtra::pack_rows("LBXBHC", 1, 1) %>%
+  kableExtra::pack_rows("LBXPDE", 2, 2) %>%
+  kableExtra::pack_rows("LBXPDT", 3, 3)
+```
+
+### Logistic regression
+
+```{r logreg_adj2}
+logreg_table_adj[-c(1:2)] %>% filter(ROC>0.6, p.fdr.sig=="*") -> logreg_table_adj_sm2
+
+# Adjusted table
+kableExtra::kable(logreg_table_adj_sm2,caption="Adjusted Log Reg", booktabs = T, align = c("l","l","r","r","r","r","r","r","r","l","l","r")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  kableExtra::pack_rows("LBXBHC", 1,1) %>%
+  kableExtra::pack_rows("LBXPDE", 2,2) %>%
+  kableExtra::pack_rows("LBXPDT", 3,3) %>%
+  kableExtra::pack_rows("URX24D", 4,4) %>%
+  kableExtra::pack_rows("URXPAR", 5,5)
+```
+
+## Linear regression
+
+```{r linreg, warning=FALSE}
+suppressMessages(library(pROC))
+# Linreg for farmwork
+for(i in seq(1:desired_length)) {
+  full_chem_demo_dat %>% dplyr::select(!starts_with("WT_")) -> temp_dat1
+  full_chem_demo_dat %>% dplyr::select(weight_names[i]) -> temp_dat2
+  colnames(temp_dat2) <- c("WT")
+  cbind(temp_dat1, temp_dat2) %>%
+    filter(!is.na(WT), chemical==chem_names[i]) -> temp_dat
+  
+  temp_dat %>% filter(!is.na(molarity), !is.na(farmwork),
+                      WT > 0) -> no.na.data
+  
+  if(grepl('^LB', chem_names[i])){
+    temp_dat %>% filter(!is.na(molarity), !is.na(farmwork),
+                      !is.na(BMXBMI), !is.na(RIDAGEYR), !is.na(SDDSRVYR),
+                      !is.na(RIAGENDR), !is.na(edu), !is.na(RIDRETH1),
+                      WT > 0) -> no.na.data2
+  } else {
+    temp_dat %>% filter(!is.na(molarity), !is.na(farmwork),
+                      !is.na(BMXBMI), !is.na(RIDAGEYR), !is.na(SDDSRVYR),
+                      !is.na(RIAGENDR), !is.na(edu), !is.na(RIDRETH1),
+                      !is.na(URXUCR_umol), WT > 0) -> no.na.data2
+  }
+  
+  svydesign(strata  = no.na.data$SDMVSTRA, id   = no.na.data$SDMVPSU,
+            weights = no.na.data$WT,       data = no.na.data, nest=T) -> nhanes.svy
+  no.na.data %>% dplyr::select(SDMVSTRA, SEQN) %>%
+    group_by(SDMVSTRA) %>% summarise(n=as.numeric(n()))->Ntotal
+  as.data.frame(as.matrix(Ntotal))->Ntotal
+  round(svytable(~farmwork, nhanes.svy, Ntotal=Ntotal)[2]) -> estNgroup
+  no.na.data %>% nrow() -> n
+  
+  svydesign(strata  = no.na.data2$SDMVSTRA, id   = no.na.data2$SDMVPSU,
+            weights = no.na.data2$WT,       data = no.na.data2, nest=T) -> nhanes.svy2
+  no.na.data2 %>% dplyr::select(SDMVSTRA, SEQN) %>%
+    group_by(SDMVSTRA) %>% summarise(n=as.numeric(n()))->Ntotal2
+  as.data.frame(as.matrix(Ntotal2))->Ntotal2
+  round(svytable(~farmwork, nhanes.svy2, Ntotal=Ntotal2)[2]) -> estNgroup2
+  no.na.data2 %>% nrow() -> n2
+      
+      #model included
+      svyglm(molarity ~ farmwork, design=nhanes.svy,
+             family = quasi(link = "log", variance = "mu")) -> fw_raw
+      
+      #model included
+      if(grepl('^LB', chem_names[i])){
+        svyglm(molarity ~ farmwork + BMXBMI + RIDAGEYR + SDDSRVYR +
+                 factor(RIAGENDR) + factor(edu) + factor(RIDRETH1),
+               design = nhanes.svy2, family = quasi(link = "log", variance = "mu")) -> fw_adj
+      } else {
+        svyglm(molarity ~ farmwork + BMXBMI + RIDAGEYR + SDDSRVYR +
+                 factor(RIAGENDR) + factor(edu) + factor(RIDRETH1) + log(URXUCR_umol),
+               design = nhanes.svy2, family = quasi(link = "log", variance = "mu")) -> fw_adj
+      }
+      
+      # Max VIF
+      #max(summ(fw_adj, vifs=TRUE)$coeftable[,5], na.rm=TRUE) -> vif_fw_adj
+      
+      # R2
+      r2_raw = (fw_raw$null.deviance - fw_raw$deviance) / fw_raw$null.deviance
+      r2_adj = (fw_adj$null.deviance - fw_adj$deviance) / fw_adj$null.deviance
+      
+        data.frame(chem     = c(chem_names[i],   chem_names[i]),
+                   model    = c("Unadjusted",    "Adjusted"),
+                   variable = c("FarmWorker",    "FarmWorker"),
+                   weight   = c(weight_names[i], weight_names[i]),
+                   estNgroup= c(estNgroup,       estNgroup2),
+                   N        = c(n       ,        n2),
+                   beta     = c(coefficients(fw_raw)[2],
+                                coefficients(fw_adj)[2]),
+                   CI_2.5   = c(confint(fw_raw)[2,1],
+                                confint(fw_adj)[2,1]),
+                   CI_97.5  = c(confint(fw_raw)[2,2],
+                                confint(fw_adj)[2,2]),
+                   t        = c(summary(fw_raw)$coefficients[2,3],
+                                summary(fw_adj)$coefficients[2,3]),
+                   #maxVIF   = c(NA_real_, vif_fw_adj),
+                   r2       = c(r2_raw,
+                                r2_adj),
+                   p        = c(summary(fw_raw)$coefficients[2,4],
+                                summary(fw_adj)$coefficients[2,4])
+                   ) -> data_rows
+      
+
+  datalist[[i]] <- data_rows
+  #print(i)
+}
+do.call(rbind, datalist) -> linreg_results_fw
+
+# Linreg for non-Citizen
+for(i in seq(1:desired_length)) {
+  full_chem_demo_dat %>% dplyr::select(!starts_with("WT_")) -> temp_dat1
+  full_chem_demo_dat %>% dplyr::select(weight_names[i]) -> temp_dat2
+  colnames(temp_dat2) <- c("WT")
+  cbind(temp_dat1, temp_dat2) %>%
+    filter(!is.na(WT), chemical==chem_names[i]) -> temp_dat
+
+  temp_dat %>%
+    filter(!is.na(molarity), !is.na(DMDCITZN),
+                      WT > 0) -> no.na.data
+  
+  if(grepl('^LB', chem_names[i])){
+    temp_dat %>%
+      filter(!is.na(molarity), !is.na(DMDCITZN),
+             !is.na(BMXBMI), !is.na(RIDAGEYR), !is.na(SDDSRVYR),
+             !is.na(RIAGENDR), !is.na(edu), !is.na(RIDRETH1),
+             WT > 0) -> no.na.data2
+  } else {
+    temp_dat %>%
+      filter(!is.na(molarity), !is.na(DMDCITZN),
+             !is.na(BMXBMI), !is.na(RIDAGEYR), !is.na(SDDSRVYR),
+             !is.na(RIAGENDR), !is.na(edu), !is.na(RIDRETH1),
+             !is.na(URXUCR_umol), WT > 0) -> no.na.data2
+  }
+  
+  svydesign(strata  = no.na.data$SDMVSTRA, id   = no.na.data$SDMVPSU,
+            weights = no.na.data$WT,       data = no.na.data, nest=T) -> nhanes.svy
+  no.na.data %>% dplyr::select(SDMVSTRA, SEQN) %>%
+    group_by(SDMVSTRA) %>% summarise(n=as.numeric(n()))->Ntotal
+  as.data.frame(as.matrix(Ntotal))->Ntotal
+  round(svytable(~farmwork, nhanes.svy, Ntotal=Ntotal)[2]) -> estNgroup
+  no.na.data %>% nrow() -> n
+  
+  svydesign(strata  = no.na.data2$SDMVSTRA, id   = no.na.data2$SDMVPSU,
+            weights = no.na.data2$WT,       data = no.na.data2, nest=T) -> nhanes.svy2
+  no.na.data2 %>% dplyr::select(SDMVSTRA, SEQN) %>%
+    group_by(SDMVSTRA) %>% summarise(n=as.numeric(n()))->Ntotal2
+  as.data.frame(as.matrix(Ntotal2))->Ntotal2
+  round(svytable(~farmwork, nhanes.svy2, Ntotal=Ntotal2)[2]) -> estNgroup2
+  no.na.data2 %>% nrow() -> n2
+
+      #include
+      svyglm(molarity ~ DMDCITZN, design=nhanes.svy,
+             family = quasi(link = "log", variance = "mu")) -> cz_raw
+      
+      #include
+      if(grepl('^LB', chem_names[i])) {
+        svyglm(molarity ~ DMDCITZN + BMXBMI + RIDAGEYR + SDDSRVYR +
+                 factor(RIAGENDR) + factor(edu) + factor(RIDRETH1),
+               design = nhanes.svy2, family = quasi(link = "log", variance = "mu")) -> cz_adj
+      } else {
+        svyglm(molarity ~ DMDCITZN + BMXBMI + RIDAGEYR + SDDSRVYR +
+                 factor(RIAGENDR) + factor(edu) + factor(RIDRETH1) + log(URXUCR_umol),
+               design = nhanes.svy2, family = quasi(link = "log", variance = "mu")) -> cz_adj
+      }
+      
+      # R2
+      r2_raw = (cz_raw$null.deviance - cz_raw$deviance) / cz_raw$null.deviance
+      r2_adj = (cz_adj$null.deviance - cz_adj$deviance) / cz_adj$null.deviance
+      
+        data.frame(chem     = c(chem_names[i],   chem_names[i]),
+                   model    = c("Unadjusted",    "Adjusted"),
+                   variable = c("NonCitizen",    "NonCitizen"),
+                   weight   = c(weight_names[i], weight_names[i]),
+                   estNgroup= c(estNgroup,       estNgroup2),
+                   N        = c(n       ,        n2),
+                   beta     = c(exp(coefficients(cz_raw)[2]),
+                                exp(coefficients(cz_adj)[2])),
+                   CI_2.5   = c(exp(confint(cz_raw))[2,1],
+                                exp(confint(cz_adj))[2,1]),
+                   CI_97.5  = c(exp(confint(cz_raw))[2,2],
+                                exp(confint(cz_adj))[2,2]),
+                   t        = c(summary(cz_raw)$coefficients[2,3],
+                                summary(cz_adj)$coefficients[2,3]),
+                   r2       = c(r2_raw,
+                                r2_adj),
+                   p        = c(summary(cz_raw)$coefficients[2,4],
+                                summary(cz_adj)$coefficients[2,4])
+                   ) -> data_rows
+  
+  datalist[[i]] <- data_rows
+  #print(i)
+}
+do.call(rbind, datalist) -> linreg_results_cz
+
+# Organize into unadjusted and adjusted tables
+linreg_results_fw %>%
+  filter(model == "Unadjusted") %>%
+  mutate(order = 1, order = cumsum(order)) -> linreg_results_fw_raw
+linreg_results_fw %>%
+  filter(model == "Adjusted") %>%
+  mutate(order = 1, order = cumsum(order)) -> linreg_results_fw_adj
+linreg_results_cz %>%
+  filter(model == "Unadjusted") %>%
+  mutate(order = 1, order = cumsum(order)) -> linreg_results_cz_raw
+linreg_results_cz %>%
+  filter(model == "Adjusted") %>%
+  mutate(order = 1, order = cumsum(order)) -> linreg_results_cz_adj
+
+rbind(linreg_results_fw_raw, linreg_results_cz_raw) %>%
+  arrange(order, variable) %>% dplyr::select(-order) -> linreg_results_raw
+rbind(linreg_results_fw_adj, linreg_results_cz_adj) %>%
+  arrange(order, variable) %>% dplyr::select(-order) -> linreg_results_adj
+
+
+# Format for tables
+linreg_results_raw %>%
+  mutate(p.fdr = p.adjust(p, method="fdr"),
+         p.fdr.sig = ifelse(p.fdr<0.05,"*","")) %>%
+  mutate(beta = if_else(abs(beta) < 0.0001,
+                     formatC(beta, digits = 4, format = "e"),
+                     formatC(beta, digits = 4, format = "f", drop0trailing = FALSE)),
+         CI_2.5 = if_else(abs(CI_2.5) < 0.0001,
+                     formatC(CI_2.5, digits = 4, format = "e"),
+                     formatC(CI_2.5, digits = 4, format = "f", drop0trailing = FALSE)),
+         CI_97.5 = if_else(abs(CI_97.5) < 0.0001,
+                     formatC(CI_97.5, digits = 4, format = "e"),
+                     formatC(CI_97.5, digits = 4, format = "f", drop0trailing = FALSE)),
+         p = if_else(p < 0.01,
+                     formatC(p, digits = 4, format = "e"),
+                     formatC(p, digits = 4, format = "f", drop0trailing = FALSE)),
+         p.fdr = if_else(p.fdr < 0.01,
+                         formatC(p.fdr, digits = 4, format = "e"),
+                         formatC(p.fdr, digits = 4, format = "f", drop0trailing = FALSE)),
+  ) %>%
+  mutate_if(is.numeric, function(x) {
+    formatC(x, digits = 4, format = "f", drop0trailing = FALSE)
+  }) %>%
+  mutate(estNgroup =as.integer(estNgroup),
+         N =as.integer(N)) -> linreg_table_raw
+
+linreg_results_adj %>%
+  mutate(p.fdr = p.adjust(p, method="fdr"),
+         p.fdr.sig = ifelse(p.fdr<0.05,"*","")) %>%
+  mutate(beta = if_else(abs(beta) < 0.0001,
+                     formatC(beta, digits = 4, format = "e"),
+                     formatC(beta, digits = 4, format = "f", drop0trailing = FALSE)),
+         CI_2.5 = if_else(abs(CI_2.5) < 0.0001,
+                     formatC(CI_2.5, digits = 4, format = "e"),
+                     formatC(CI_2.5, digits = 4, format = "f", drop0trailing = FALSE)),
+         CI_97.5 = if_else(abs(CI_97.5) < 0.0001,
+                     formatC(CI_97.5, digits = 4, format = "e"),
+                     formatC(CI_97.5, digits = 4, format = "f", drop0trailing = FALSE)),
+         p = if_else(p < 0.01,
+                     formatC(p, digits = 4, format = "e"),
+                     formatC(p, digits = 4, format = "f", drop0trailing = FALSE)),
+         p.fdr = if_else(p.fdr < 0.01,
+                         formatC(p.fdr, digits = 4, format = "e"),
+                         formatC(p.fdr, digits = 4, format = "f", drop0trailing = FALSE)),
+  ) %>%
+  mutate_if(is.numeric, function(x) {
+    formatC(x, digits = 4, format = "f", drop0trailing = FALSE)
+  }) %>%
+  mutate(estNgroup =as.integer(estNgroup),
+         N =as.integer(N)) -> linreg_table_adj
+```
+
+### Linear regression table (unadjusted)
+
+```{r linreg_raw}
+linreg_table_raw[-c(1:2)] -> linreg_table_raw_sm
+
+# Unadjusted table
+kableExtra::kable(linreg_table_raw_sm,caption="Unadjusted Lin Reg", booktabs = T, align = c("l","l","r","r","r","r","r","r","r","l","l","r")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  kableExtra::pack_rows("LBXBHC", 1, 2) %>%
+  kableExtra::pack_rows("LBXDIE", 3, 4) %>%
+  kableExtra::pack_rows("LBXHPE", 5, 6) %>%
+  kableExtra::pack_rows("LBXPDE", 7, 8) %>%
+  kableExtra::pack_rows("LBXPDT", 9, 10) %>%
+  kableExtra::pack_rows("URX24D", 11, 12) %>%
+  kableExtra::pack_rows("URXDEA", 13, 14) %>%
+  kableExtra::pack_rows("URXOPM", 15, 16) %>%
+  kableExtra::pack_rows("URXPAR", 17, 18) %>%
+  kableExtra::pack_rows("URXCPM", 19, 20) %>%
+  #kableExtra::pack_rows("URXCPF", 21, 22) %>%
+  #kableExtra::pack_rows("URXCPO", 23, 24) %>%
+  kableExtra::pack_rows("URX14D", 21, 28) %>%
+  kableExtra::pack_rows("URXDCB", 29, 36)
+```
+
+### Linear regression table (adjusted)
+
+```{r linreg_adj}
+linreg_table_adj[-c(1:2)] -> linreg_table_adj_sm
+
+# Adjusted table
+kableExtra::kable(linreg_table_adj_sm,caption="Adjusted Lin Reg", booktabs = T, align = c("l","l","r","r","r","r","r","r","r","l","l","r")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  kableExtra::pack_rows("LBXBHC", 1, 2) %>%
+  kableExtra::pack_rows("LBXDIE", 3, 4) %>%
+  kableExtra::pack_rows("LBXHPE", 5, 6) %>%
+  kableExtra::pack_rows("LBXPDE", 7, 8) %>%
+  kableExtra::pack_rows("LBXPDT", 9, 10) %>%
+  kableExtra::pack_rows("URX24D", 11, 12) %>%
+  kableExtra::pack_rows("URXDEA", 13, 14) %>%
+  kableExtra::pack_rows("URXOPM", 15, 16) %>%
+  kableExtra::pack_rows("URXPAR", 17, 18) %>%
+  kableExtra::pack_rows("URXCPM", 19, 20) %>%
+  #kableExtra::pack_rows("URXCPF", 21, 22) %>%
+  #kableExtra::pack_rows("URXCPO", 23, 24) %>%
+  kableExtra::pack_rows("URX14D", 21, 28) %>%
+  kableExtra::pack_rows("URXDCB", 29, 36)
+```
+
+### Volcano Plot (Log Reg adjusted results)
+
+```{r vol_plot, warning=FALSE}
+logreg_results_adj %>%
+  mutate(p.fdr = p.adjust(p, method="fdr"),
+         p.fdr.sig = ifelse(p.fdr<0.05,"*","")) %>%
+  filter(!is.na(OR)) %>%
+  filter(str_detect(weight, "_[ABC]_", negate=T)) %>%
+  left_join(mw %>% select(chem=chemical, commonname)) %>%
+  mutate(label=
+           case_when(p.fdr < 0.05 ~ commonname,
+                     OR> 1.5 ~ commonname,
+                     TRUE ~ NA_character_),
+         variable = as.factor(variable),
+         color = as.factor(ifelse(p.fdr < 0.05, "p < 0.05", "p \u2265 0.05"))) -> vol_plot_data
+
+#Reverse log scale for y axis
+reverselog_trans <- function(base = exp(1)) {
+  trans <- function(x) -log(x, base)
+  inv <- function(x) base^(-x)
+  trans_new(paste0("reverselog-", format(base)), trans, inv,
+            log_breaks(base = base),
+            domain = c(1e-100, Inf))
+}
+
+#Breaks for FDR legend
+my_breaks = c(1e-8, 1e-5, 5e-2, 1)
+
+#Italicized y axis title
+my_y_title <- expression(paste(italic("p"), "-value (FDR)"))
+
+vol_plot_data %>%
+  ggplot(aes(x=OR, y=p.fdr, shape=variable, fill=color, label=label), size=1) +
+  geom_vline(xintercept = 1, linetype="dotted") +
+  #geom_hline(yintercept = 0.05, linetype="dotted") +
+  geom_point(size=2) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        #legend.position="bottom", legend.box="vertical", #legend.margin=margin(),
+        #legend.position=c(2,0.005), legend.box="horizontal", 
+        legend.title = element_text(size=12),
+        axis.title = element_text(size=12),
+        axis.text = element_text(size=10),
+        text = element_text(size = 10),
+        legend.margin=margin(t = 0.2, unit='cm'),
+        legend.text = element_text(size=10)) +
+  scale_shape_manual(values = c(21,24)) +
+  scale_fill_manual(name="Significance", values=c('black','gray75'),
+                     labels = c(expression(paste(italic("p"), " < 0.05")),
+                                expression(paste(italic("p"), " \u2265 0.05"))),
+    guide=guide_legend(override.aes =
+                         list(color=c('black','gray75'),
+                              #shape = c(21,23),
+                              order=1))) +
+  # scale_color_gradient(name="FDR", trans="log", #values=c('black','gray90'),
+  #                      low = "#56B1F7", high = "#132B43",
+  #                      breaks = my_breaks, labels = my_breaks) +
+  labs(shape="Category") +
+  scale_x_continuous(breaks=seq(-1,11,by=2),limits=c(-1, 12)) +
+  scale_y_continuous(trans=reverselog_trans(10), limits=c(1, 1e-11),
+                     breaks=c(1e-01,1e-04,1e-07,1e-10)) +
+  xlab("Odds Ratio") +
+  ylab(my_y_title)+
+  ggrepel::geom_label_repel(aes(x=OR, y=p.fdr, label = label,
+                       #fill=factor(color),
+                       #colour="white"
+                       ),
+                       min.segment.length = 0, seed=42,
+                           nudge_x = 1, nudge_y = 1.7,
+                           box.padding = 0.5,
+                   show.legend = FALSE,
+                   direction = "both",
+                   inherit.aes = FALSE)
+
+#Save figure for publication
+#ggsave("vol_plot.pdf", width=6.5, height=3.5, units="in", device=cairo_pdf)
+```
+
+### Boxplot Plot (NHANES and Model ACC)
+
+```{r box_plot, warning=FALSE}
+full_chem_demo_dat %>%
+  select(casn, molarity) %>%
+  #filter(!is.na(molarity)) %>%
+  group_by(casn) %>%
+  left_join(toxcast %>% select(casn, chnm) %>% unique()) %>%
+  ungroup() %>%
+  mutate(group="NHANES") -> df_temp
+
+full_chem_demo_dat %>%
+  filter(farmwork==1) %>%
+  select(casn, molarity) %>%
+  #filter(!is.na(molarity)) %>%
+  group_by(casn) %>%
+  left_join(toxcast %>% select(casn, chnm) %>% unique()) %>%
+  ungroup() %>%
+  mutate(group="Farmwork") -> df_temp_fw
+
+full_chem_demo_dat %>%
+  filter(DMDCITZN==1) %>%
+  select(casn, molarity) %>%
+  #filter(!is.na(molarity)) %>%
+  group_by(casn) %>%
+  left_join(toxcast %>% select(casn, chnm) %>% unique()) %>%
+  ungroup() %>%
+  mutate(group="Noncitizen") -> df_temp_nc
+
+toxcast %>%
+  select(casn, molarity=modl_acc, chnm) %>%
+  filter(!is.na(molarity)) %>%
+  mutate(group="Model ACC") %>%
+  rbind(df_temp) %>%
+  rbind(df_temp_fw) %>%
+  rbind(df_temp_nc) %>%
+  mutate(chnm = as.factor(chnm),
+         group = as.factor(group)) %>%
+  filter(!chnm %in% c("Chlorpyrifos oxon", "Chlorpyrifos")) -> box_plot_data
+
+box_plot_data$group <- factor(box_plot_data$group,
+                              levels = c("Model ACC", "Farmwork", "Noncitizen", "NHANES"))
+
+box_plot_data %>%
+  select(chnm) %>%
+  distinct() %>%
+  mutate(chnm_wrap =
+           case_when(
+             chnm == "3-Phenoxybenzoic acid"           ~ "3-Phenoxybenzoic\nacid",
+             chnm == "Dichlorodiphenyltrichloroethane" ~ "Dichlorodiphenyl\ntrichloroethane",
+             chnm == "beta-Hexachlorocyclohexane"      ~ "beta-Hexachloro\ncyclohexane",
+             chnm == "2,4-Dichlorophenol"              ~ "2,4-Dichloro\nphenol",
+             chnm == "2,4-Dichlorophenoxyacetic acid"  ~ "2,4-Dichlorophen\noxyacetic acid",
+             chnm == "3,5,6-Trichloro-2-pyridinol"     ~ "3,5,6-Trichloro-\n2-pyridinol",
+             chnm == "2,5-Dichlorophenol"              ~ "2,5-Dichloro\nphenol",
+             chnm == "p,p'-DDE"              ~ "p,p'-DDE",
+             chnm == "Heptachlor"              ~ "Heptachlor",
+             chnm == "Dieldrin"              ~ "Dieldrin",
+             chnm == "4-Nitrophenol"              ~ "4-Nitrophenol",
+             chnm == "DEET"              ~ "DEET",
+             TRUE ~ NA_character_
+           ))-> chnm_wrap_names
+
+#Order boxplots
+box_plot_data %>%
+  group_by(chnm, group) %>%
+  summarise(med_mol = median(molarity,na.rm=TRUE)) %>%
+  ungroup() -> group_medians
+
+box_plot_data %>%
+  filter(group %in% c("Model ACC", "NHANES")) %>%
+  left_join(group_medians %>% filter(group=="NHANES") %>% select(-group)) %>%
+  #filter(group %in% c("Model ACC", "Noncitizen")) %>%
+  #left_join(group_medians %>% filter(group=="Noncitizen") %>% select(-group)) %>%
+  #filter(group %in% c("Model ACC", "Farmwork")) %>%
+  #left_join(group_medians %>% filter(group=="Farmwork") %>% select(-group)) %>%
+  left_join(chnm_wrap_names) %>%
+  ggplot(aes(x = reorder(chnm_wrap, med_mol),
+             y=molarity, fill=group))+
+  geom_boxplot(outlier.size=0.25)+
+  scale_fill_manual(values=c('gray85','white'))+
+  scale_y_continuous(trans="log10")+
+  #scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) +
+  theme_bw() +
+  theme(
+    axis.text.x= element_text(angle=90,hjust=0.95,vjust=0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom",
+        #axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+        legend.title = element_blank(),
+        axis.title = element_text(size=12),
+        axis.text = element_text(size=10),
+        text = element_text(size = 10),
+        legend.text = element_text(size=10)) +
+  ylab("Molarity (\u03bcM)") +
+  xlab("Chemical") +
+  coord_flip()
+
+#ggsave("box_plot.pdf", width=3.5, height=6.5, units="in", device=cairo_pdf)
+```
+
+## Non-parametric demographic data analysis
+
+Look at demographics.
+
+```{r demo}
+bio.demo <- svydesign(id = ~SDMVPSU, strata = ~SDMVSTRA,
+                      family = ~quasibinomial, weights = ~WTMEC16YR,
+                      nest = TRUE, data = full_chem_demo_dat)
+
+svyranktest(BMXBMI   ~ indiv_chem_bioactiv, bio.demo, test = c("wilcoxon"))
+svyranktest(RIDAGEYR ~ indiv_chem_bioactiv, bio.demo, test = c("wilcoxon"))
+svyranktest(INDFMPIR ~ indiv_chem_bioactiv, bio.demo, test = c("wilcoxon"))
+
+svychisq( ~ SDDSRVYR + indiv_chem_bioactiv, bio.demo, statistic = c("Chisq"))
+svychisq( ~ RIAGENDR + indiv_chem_bioactiv, bio.demo, statistic = c("Chisq"))
+svychisq( ~ RIDRETH1 + indiv_chem_bioactiv, bio.demo, statistic = c("Chisq"))
+svychisq( ~ farmwork + indiv_chem_bioactiv, bio.demo, statistic = c("Chisq"))
+#svychisq( ~ citzn    + indiv_chem_bioactiv, bio.demo, statistic = c("Chisq"))
+svychisq( ~ DMDBORN  + indiv_chem_bioactiv, bio.demo, statistic = c("Chisq"))
+svychisq( ~ edu      + indiv_chem_bioactiv, bio.demo, statistic = c("Chisq"))
+
+full_chem_demo_dat %>%
+  dplyr::select(SEQN,bioactiv_count) %>%
+  arrange(SEQN,bioactiv_count) %>%
+  distinct() %>%
+  ggplot(aes(x=bioactiv_count)) + 
+  geom_histogram(binwidth=1) + xlab("Number of bioactive chemicals within single subject")
+```
